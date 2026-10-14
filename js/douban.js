@@ -494,6 +494,17 @@ async function fetchDoubanData(url) {
     }
 }
 
+// 海报加载失败自动重试（指数退避，最多 4 次），应对冷启动/偶发超时
+function retryPoster(img) {
+    let n = parseInt(img.dataset.rc || '0', 10) + 1;
+    img.dataset.rc = n;
+    if (n > 4) { img.onerror = null; return; }
+    const base = img.src.split('?')[0];
+    setTimeout(function () {
+        img.src = base + (base.indexOf('?') >= 0 ? '&' : '?') + 'r=' + Date.now() + '_' + n;
+    }, 500 * n);
+}
+
 // 抽取渲染豆瓣卡片的逻辑到单独函数
 function renderDoubanCards(data, container) {
     // 创建文档片段以提高性能
@@ -524,19 +535,17 @@ function renderDoubanCards(data, container) {
                 .replace(/>/g, '&gt;');
             
             // 处理图片URL
-            // 1. 直接使用豆瓣图片URL (添加no-referrer属性)
+            // 直连豆瓣必然被防盗链拦截（418/403），所以直接走代理，并对失败做自动重试
             const originalCoverUrl = item.cover;
-            
-            // 2. 也准备代理URL作为备选
             const proxiedCoverUrl = PROXY_URL + encodeURIComponent(originalCoverUrl);
             
             // 为不同设备优化卡片布局
             card.innerHTML = `
                 <div class="relative w-full aspect-[2/3] overflow-hidden cursor-pointer" onclick="fillAndSearchWithDouban('${safeTitle}')">
-                    <img src="${originalCoverUrl}" alt="${safeTitle}" 
+                    <img src="${proxiedCoverUrl}" alt="${safeTitle}" 
                         class="w-full h-full object-cover transition-transform duration-500 hover:scale-110"
-                        onerror="this.onerror=null; this.src='${proxiedCoverUrl}'; this.classList.add('object-contain');"
-                        loading="lazy" referrerpolicy="no-referrer">
+                        onerror="retryPoster(this)"
+                        loading="lazy">
                     <div class="absolute inset-0 bg-gradient-to-t from-black to-transparent opacity-60"></div>
                     <div class="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-2 py-1 rounded-sm">
                         <span class="text-yellow-400">★</span> ${safeRate}
