@@ -184,10 +184,31 @@ export async function onRequest(context) {
         });
 
         try {
-            // 直接请求目标 URL
+            // 直接请求目标 URL（带重试，最多 3 次，应对豆瓣偶发超时）
             logDebug(`开始直接请求: ${targetUrl}`);
-            // Cloudflare Functions 的 fetch 默认支持重定向
-            const response = await fetch(targetUrl, { headers, redirect: 'follow' });
+            let response = null;
+            let lastErr = null;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    response = await fetch(targetUrl, { headers, redirect: 'follow' });
+                    // 成功或 4xx（非瞬时，重试无意义）就停止；5xx/网络错误继续重试
+                    if (response.ok || (response.status >= 400 && response.status < 500)) break;
+                    lastErr = new Error(`HTTP ${response.status}`);
+                    await new Promise(r => setTimeout(r, 400));
+                } catch (e) {
+                    lastErr = e; response = null;
+                    await new Promise(r => setTimeout(r, 400));
+                }
+            }
+            if (!response) throw lastErr || new Error('请求失败');
+
+            const contentType = response.headers.get('Content-Type') || '';
+
+            // 图片/音视频等二进制：直接透传原始响应流（绝不用 text() 读取，避免损坏字节）
+            if (/^(image|video|audio)\//.test(contentType) || isMediaFile(targetUrl, contentType)) {
+                logDebug(`二进制透传: ${targetUrl}, Content-Type: ${contentType}`);
+                return { binary: true, response, contentType, responseHeaders: response.headers };
+            }
 
             if (!response.ok) {
                  const errorBody = await response.text().catch(() => '');
@@ -195,9 +216,8 @@ export async function onRequest(context) {
                  throw new Error(`HTTP error ${response.status}: ${response.statusText}. URL: ${targetUrl}. Body: ${errorBody.substring(0, 150)}`);
             }
 
-            // 读取响应内容为文本
+            // 仅文本内容才读取为文本
             const content = await response.text();
-            const contentType = response.headers.get('Content-Type') || '';
             logDebug(`请求成功: ${targetUrl}, Content-Type: ${contentType}, 内容长度: ${content.length}`);
             return { content, contentType, responseHeaders: response.headers }; // 同时返回原始响应头
 
@@ -465,7 +485,19 @@ export async function onRequest(context) {
         }
 
         // --- 实际请求 ---
-        const { content, contentType, responseHeaders } = await fetchContentWithType(targetUrl);
+        const result = await fetchContentWithType(targetUrl);
+
+        // 图片/音视频等二进制：直接流式透传，带 7 天长缓存（Cloudflare 边缘缓存，减少重复请求豆瓣）
+        if (result.binary) {
+            const fh = new Headers(result.responseHeaders);
+            fh.set('Cache-Control', 'public, max-age=604800, immutable');
+            fh.set('Access-Control-Allow-Origin', '*');
+            fh.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+            fh.set('Access-Control-Allow-Headers', '*');
+            return new Response(result.response.body, { status: result.response.status, headers: fh });
+        }
+
+        const { content, contentType, responseHeaders } = result;
 
         // --- 写入缓存 (KV) ---
         if (kvNamespace) {
