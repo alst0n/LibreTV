@@ -179,8 +179,11 @@ export async function onRequest(context) {
             'Accept': '*/*',
             // 尝试传递一些原始请求的头信息
             'Accept-Language': request.headers.get('Accept-Language') || 'zh-CN,zh;q=0.9,en;q=0.8',
-            // 尝试设置 Referer 为目标网站的域名，或者传递原始 Referer
-            'Referer': request.headers.get('Referer') || new URL(targetUrl).origin
+            // Referer 绝不能透传浏览器来源（a101 域名会被豆瓣防盗链判 403）。
+            // 豆瓣固定用 movie.douban.com；其它站点用目标自身 origin。
+            'Referer': /doubanio\.com|douban\.com/.test(targetUrl)
+                ? 'https://movie.douban.com/'
+                : (new URL(targetUrl).origin + '/')
         });
 
         try {
